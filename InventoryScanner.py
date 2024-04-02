@@ -3,6 +3,7 @@ import requests
 from pymongo import MongoClient
 from pyfcm import FCMNotification
 import os
+from datetime import datetime
 
 logger = logging.getLogger('azure')
 logger.setLevel(logging.INFO)
@@ -285,8 +286,12 @@ def add_to_instance_list(weapons, bungieID):
         newWeapons.append(simplified_weapon)
         logging.info(f"Added weapon to instance list: {simplified_weapon['itemInstanceId']}")
     
-    collection.update_one({'bungieID': bungieID}, {'$set': {'weapons': newWeapons}})
-    logging.info(f"Added {weapons.length} weapons to instance list for user ID: {bungieID}")
+    # Get current time
+    current_time = datetime.now()
+
+    # Update weapons and timestamp
+    collection.update_one({'bungieID': bungieID}, {'$set': {'weapons': newWeapons, 'timestamp': current_time}})
+    logging.info(f"Added {len(weapons)} weapons to instance list for user ID: {bungieID}")
     
 def add_to_recent_weapons(weapon, bungieID):
     collection = db['UserLatestWeapons']

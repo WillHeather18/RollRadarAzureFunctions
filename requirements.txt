@@ -6,3 +6,4 @@ azure-functions
 pymongo
 azure-storage-queue
 pyfcm
+bs4
