@@ -2,8 +2,9 @@ import logging
 import azure.functions as func
 from InventoryScanner import ProcessQueueMessage
 from OAuthRefresh import refresh_all_tokens
-from DailyRefresh import DailyRefreshCore
 from Scraper import ScrapeGodRolls
+from DailyRefresh import DailyRefreshCore
+from InventoryReader import GetInventory
 import os
 from datetime import datetime
 from pymongo import MongoClient
@@ -13,6 +14,7 @@ from azure.storage.queue import (
         BinaryBase64DecodePolicy
 )
 import json
+import asyncio
 
 
 MONGODB_URI = os.environ['MONGODB_URI']  # MongoDB connection string
@@ -25,7 +27,7 @@ db = clent[DB_NAME]
 
 app = func.FunctionApp()
 
-@app.schedule(schedule="0 */5 * * * *", arg_name="enqueueUserChecks", run_on_startup=False,
+@app.schedule(schedule="0 */5 * * * *", arg_name="enqueueUserChecks", run_on_startup=True,
               use_monitor=True) 
 def userQueueTimer(enqueueUserChecks: func.TimerRequest) -> None:
     if enqueueUserChecks.past_due:
@@ -38,12 +40,17 @@ def userQueueTimer(enqueueUserChecks: func.TimerRequest) -> None:
         
     collection = db['UserDetails']
         
-    cursor = collection.find({}, {'bungie_id': 1, 'membership_type': 1, "access_token": 1})
-    user_data = [{'bungie_id': doc['bungie_id'], 'membership_type': doc['membership_type'], 'access_token' : doc['access_token']} for doc in cursor]
+    cursor = collection.find({}, {'bungie_id': 1, 'membership_type': 1, "access_token": 1, "destiny_membership_id": 1})
+    user_data = [{
+        'bungie_id': doc['bungie_id'],
+        'membership_type': doc['membership_type'],
+        'access_token': doc['access_token'],
+        'destiny_membership_id': doc.get('destiny_membership_id')  # Use .get() to avoid KeyError
+    } for doc in cursor]
 
     logging.info(user_data)
 
-    # Enqueue each user ID and membership type
+    # Enqueue each user ID, membership type, and destiny membership id
     for user in user_data:
         message = json.dumps(user)        
         logging.info(f"Enqueueing user data: {message}")
@@ -66,6 +73,7 @@ def readQueueInventoryScanner(azqueue: func.QueueMessage):
         message_content = azqueue.get_body().decode('utf-8')
         logging.info(f"Processing User message")
         userDetails = json.loads(message_content)
+        logging.info(userDetails)
         ProcessQueueMessage(userDetails)
     except Exception as e:
         logging.error(f"Error processing message: {e}")
@@ -96,7 +104,9 @@ def RollRadarDailyRefresh(dailyRefresh: func.TimerRequest) -> None:
     logging.info('Python daily refresh trigger function ran at %s', datetime.now().isoformat())
     
     try:
-        DailyRefreshCore()
+        logging.info("Running daily refresh")
+        
+        DailyRefreshCore(db)
     except Exception as e:
         logging.error(f"Error running daily refresh: {e}")
         
@@ -112,28 +122,102 @@ def ScrapeGodRoll(godrollscraper: func.QueueMessage):
         logging.info("Scraped God Rolls")
     except Exception as e:
         logging.error(f"Error scraping godrolls: {e}")
-        
 
-@app.queue_trigger(arg_name="dailyinvcheck", queue_name="dailyinvqueue", connection="AzureWebJobsStorage")
-def DailyInventoryCheck(dailyinvcheck: func.QueueMessage):
+@app.queue_trigger(arg_name="invenqueue", queue_name="dailyinvqueue", connection="AzureWebJobsStorage")
+def EnqueueInvDaily(invenqueue: func.QueueMessage):
     try:
-        message_content = dailyinvcheck.get_body().decode('utf-8')
-        queuetime = json.loads(message_content)
-        logging.info(f"Processing invcheck message")
+        logging.info(f"Processing User message")
+        queue_client = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, "dailyinvusers")
 
+        queue_client.message_encode_policy = BinaryBase64EncodePolicy()
+        queue_client.message_decode_policy = BinaryBase64DecodePolicy()
+            
+        collection = db['UserDetails']
+            
+        cursor = collection.find({}, {'bungie_id': 1, 'membership_type': 1, "access_token": 1, "destiny_membership_id": 1})
+        user_data = [{'bungie_id': doc['bungie_id'], 'membership_type': doc['membership_type'], 'access_token' : doc['access_token'], 'destiny_membership_id': doc['destiny_membership_id']} for doc in cursor]
+
+        logging.info(user_data)
+
+        # Enqueue each user ID, membership type, and destiny membership id
+        for user in user_data:
+            message = json.dumps(user)        
+            logging.info(f"Enqueueing user data: {message}")
+
+            message_bytes =  message.encode('utf-8')
+            
+            queue_client.send_message(
+            queue_client.message_encode_policy.encode(content=message_bytes)
+            )
+
+        logging.info(f"Enqueued {len(user_data)} user checks.")
+
+        logging.info('Python timer trigger function executed.')
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
+        raise e
+
+
+@app.queue_trigger(arg_name="dailyinvscan", queue_name="dailyinvusers", connection="AzureWebJobsStorage")
+def DailyInvCheck(dailyinvscan: func.QueueMessage):
+    try:
+        message_content = dailyinvscan.get_body().decode('utf-8')
+        logging.info(f"Processing User message")
+        userDetails = json.loads(message_content)
+        bungieId = userDetails['bungie_id']
+        membershipType = userDetails['membership_type']
+        access_token = userDetails['access_token']
+        destiny_membership_id = userDetails['destiny_membership_id']
+        
+        asyncio.run(run_async_inventory(db, bungieId, membershipType, destiny_membership_id,access_token))
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
+        raise e   
+    
+
+
+@app.route('dailyinvscan', methods=['POST'], auth_level=func.AuthLevel.ANONYMOUS)
+def HttpDailyInvScan(req: func.HttpRequest):
+    userDetails = req.get_json()
+
+    required_keys = ['bungie_id', 'membership_type', 'access_token', 'destiny_membership_id']
+    missing_keys = [key for key in required_keys if key not in userDetails]
+
+    if missing_keys:
+        return func.HttpResponse(f"Missing required keys: {', '.join(missing_keys)}", status_code=400)
+
+    try:
+        logging.info(f"Processing User message")
+        bungieId = userDetails['bungie_id']
+        membershipType = userDetails['membership_type']
+        access_token = userDetails['access_token']
+        destiny_membership_id = userDetails['destiny_membership_id']
+        
+        inventory = asyncio.run(run_async_inventory(db, bungieId, membershipType, destiny_membership_id,access_token))
     except Exception as e:
         logging.error(f"Error processing message: {e}")
         raise e
     
-@app.queue_trigger(arg_name="dailyinvuser", queue_name="dailyinvusers", connection="AzureWebJobsStorage")
-def DailyInventoryUser(dailyinvuser: func.QueueMessage):
-    try:
-        message_content = dailyinvuser.get_body().decode('utf-8')
-        userDetails = json.loads(message_content)
-        logging.info(f"Processing invcheck message")
+    if inventory is not None:
+        return func.HttpResponse(json.dumps(inventory, cls=DateTimeEncoder), mimetype="application/json")
+    else:
+        return func.HttpResponse("No inventory found for this user.", status_code=404)
 
+
+async def run_async_inventory(db, bungieId, membershipType, destiny_membership_id,access_token):
+    try:
+        inventory = await GetInventory(db, bungieId, membershipType, destiny_membership_id, access_token)
+        # Process inventory here
+        return inventory
     except Exception as e:
-        logging.error(f"Error processing message: {e}")
-        raise e
+        logging.error(f"Error processing inventory: {e}")
+        raise
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+
+        return super().default(o)
 
 

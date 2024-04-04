@@ -7,3 +7,9 @@ pymongo
 azure-storage-queue
 pyfcm
 bs4
+requests
+asyncio
+aiohttp
+
+
+

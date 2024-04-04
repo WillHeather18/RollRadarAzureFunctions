@@ -25,13 +25,14 @@ def ProcessQueueMessage(userDetails):
     user_id = userDetails['bungie_id']
     membership_type = userDetails['membership_type']
     access_token = userDetails['access_token']
+    destinyID = userDetails['destiny_membership_id']
         
     headers = {
             'X-API-Key': API_KEY,
             'Authorization': f'Bearer {access_token}'
         }
         
-    weaponsList, destinyID = getWeaponsList(user_id)  # This needs to be converted to a synchronous call
+    weaponsList = getWeaponsList(user_id)  # This needs to be converted to a synchronous call
         
     currentWeaponList = getCurrentWeaponsList(destinyID, membership_type, headers)  # Adapt this function to be synchronous
         
@@ -90,7 +91,7 @@ def getWeaponsList(bungie_id):
     # Now you can safely access `user['weapons']` assuming the user exists and has a 'weapons' field
     if user and 'weapons' in user:
         item_ids = [weapon['itemInstanceId'] for weapon in user['weapons']]
-        return item_ids, user['destinyID']
+        return item_ids
     else:
         return []
     

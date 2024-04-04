@@ -3,7 +3,6 @@ import datetime
 from GetManifest import download_destiny_manifest
 from GetAllWeapons import GetWeapons
 from GetAllPerks import GetPerks
-from pymongo import MongoClient
 import os
 import json
 from azure.storage.queue import (
@@ -17,18 +16,13 @@ API_KEY = os.environ["API_KEY"]
 CLIENT_ID = os.environ["CLIENT_ID"]
 CLIENT_SECRET = os.environ["CLIENT_SECRET"]
 MONGODB_URI = os.environ["MONGODB_URI"]
-CONTAINER_CONNECTION_STRING = os.environ["CONTAINER_CONNECTION_STRING"]
 STORAGE_CONNECTION_STRING = os.environ['AzureWebJobsStorage']  # Azure Storage connection string
 QUEUE_NAME = 'godrollqueue'  # Azure Queue name
 
-def DailyRefreshCore() -> None:
+def DailyRefreshCore(db) -> None:
     logging.info('RollRadarDailyRefresh function started at %s', datetime.datetime.now())
         
     starttime = datetime.datetime.now()
-
-    client = MongoClient(MONGODB_URI)
-
-    db = client['RollRadar']
     
     tempfile_path = download_destiny_manifest(API_KEY) 
     
@@ -60,12 +54,7 @@ def DailyRefreshCore() -> None:
     queue_client.send_message(
     queue_client.message_encode_policy.encode(content=message_bytes)
     )
-    #GetInventory(db, API_KEY)
-
-    client.close()
-    
+        
     endtime = datetime.datetime.now()
 
     logging.info('RollRadarDailyRefresh function executed at %s', datetime.datetime.now())
-
-DailyRefreshCore()

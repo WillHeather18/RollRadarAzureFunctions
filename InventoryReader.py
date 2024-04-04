@@ -1,22 +1,23 @@
-import requests
-import json
+import aiohttp
+import asyncio
 import traceback
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed  # Import for parallel execution
-from pymongo import MongoClient
 import logging
-import numpy as np
+import os
 
 # Replace these variables with your actual values
 
-def get_weapon_perks(item_instance_id, destiny_membership_type, destiny_membership_id, headers):
+api_key = os.environ["API_KEY"]
+
+async def get_weapon_perks(item_instance_id, destiny_membership_type, destiny_membership_id, session):
     item_details_url = f"https://www.bungie.net/Platform/Destiny2/{destiny_membership_type}/Profile/{destiny_membership_id}/Item/{item_instance_id}/?components=300,302,304,305,307"
-    response = requests.get(item_details_url, headers=headers)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Failed to fetch item details for instance {item_instance_id}. Status code: {response.status_code}")
-        return None
+    async with session.get(item_details_url) as response:
+        if response.status == 200:
+            return await response.json()
+        else:
+            print(f"Failed to fetch item details for instance {item_instance_id}. Status code: {response.status}")
+            return None
     
 def load_weapon_names(db):
 
@@ -28,87 +29,79 @@ def load_weapon_names(db):
 
     return weapon_names_by_id
 
-def fetch_weapon_perks_concurrently(all_weapons, destiny_membership_type, destiny_membership_id, headers, db):
+async def fetch_weapon_perks_concurrently(all_weapons, destiny_membership_type, destiny_membership_id, session):
     user_inventory = {}
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_weapon = {executor.submit(get_weapon_perks, weapon['itemInstanceId'], destiny_membership_type, destiny_membership_id, headers): weapon for weapon in all_weapons}
-        for future in as_completed(future_to_weapon):
-            weapon = future_to_weapon[future]
-            try:
-                data = future.result()
-                if data:
-                    user_inventory[weapon['itemInstanceId']] = data
-            except Exception as exc:
-                print(f"{weapon['itemInstanceId']} generated an exception: {exc}")
-                
+    tasks = [get_weapon_perks(weapon['itemInstanceId'], destiny_membership_type, destiny_membership_id, session) for weapon in all_weapons]
+    results = await asyncio.gather(*tasks)
+    for result, weapon in zip(results, all_weapons):
+        if result:
+            user_inventory[weapon['itemInstanceId']] = result
     return user_inventory
 
-
-def fetch_destiny_membership_id(bungieId, membershipType ,headers):
-    search_url = f"https://www.bungie.net/Platform/User/GetMembershipsById/{bungieId}/{membershipType}/"
-    print (search_url)
-    response = requests.get(search_url, headers=headers)
-    print(response)
-    if response.status_code == 200:
-        data = response.json()
-        return data['Response']['destinyMemberships'][0]['membershipId'], data['Response']['destinyMemberships'][0]['membershipType']
-    else:
-        raise Exception("Failed to fetch Destiny membership ID")
-
-def fetch_profile_data(destiny_membership_id, destiny_membership_type, headers):
+async def fetch_profile_data(destiny_membership_id, destiny_membership_type, session):
     profile_url = f"https://www.bungie.net/Platform/Destiny2/{destiny_membership_type}/Profile/{destiny_membership_id}/?components=200,102"
-    response = requests.get(profile_url, headers=headers)
-    if response.status_code == 200:
-        print(f"Successfully fetched profile data for Destiny ID: {destiny_membership_id}")
-        return response.json()
-    
-    else:
-        raise Exception("Failed to fetch profile data")
+    async with session.get(profile_url) as response:
+        if response.status == 200:
+            print(f"Successfully fetched profile data for Destiny ID: {destiny_membership_id}")
+            return await response.json()
+        
+        else:
+            raise Exception("Failed to fetch profile data")
 
-def process_weapons_from_data(profile_data, destiny_membership_type, destiny_membership_id, headers, bungieId, db):
+
+async def process_weapons_from_data(profile_data, destiny_membership_type, destiny_membership_id, session, bungieId, db):
     character_ids = profile_data['Response']['characters']['data'].keys()
     vault_items = profile_data['Response']['profileInventory']['data']['items']
 
     all_weapons = []  # Store tuples or dictionaries of weapon hashes and instance IDs
     character_details = profile_data['Response']['characters']['data']
-    
-    # Loop through each character ID to fetch both equipped and unequipped items
-    for character_id in character_ids:
-        character_equipment_url = f"https://www.bungie.net/Platform/Destiny2/{destiny_membership_type}/Profile/{destiny_membership_id}/Character/{character_id}/?components=205"
-        character_inventory_url = f"https://www.bungie.net/Platform/Destiny2/{destiny_membership_type}/Profile/{destiny_membership_id}/Character/{character_id}/?components=201"
-        
-        # Fetch equipped items
-        equipment_response = requests.get(character_equipment_url, headers=headers)
-        if equipment_response.status_code == 200:
-            equipped_items = equipment_response.json().get('Response', {}).get('equipment', {}).get('data', {}).get('items', [])
-            for item in equipped_items:
-                item_instance_id = item.get('itemInstanceId', 'N/A')
-                if item_instance_id != 'N/A':
-                    all_weapons.append({'itemHash': item['itemHash'], 'itemInstanceId': item_instance_id})
-        else:
-            print(f"Failed to fetch equipped items for character {character_id}")
 
-        # Fetch unequipped items (inventory)
-        inventory_response = requests.get(character_inventory_url, headers=headers)
-        if inventory_response.status_code == 200:
-            inventory_items = inventory_response.json().get('Response', {}).get('inventory', {}).get('data', {}).get('items', [])
-            for item in inventory_items:
+    async def fetch_items(url):
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data
+            else:
+                print(f"Failed to fetch data from {url}. Status code: {response.status}")
+                return None
+
+    # Fetch items for each character and the vault asynchronously
+    tasks = []
+    for character_id in character_ids:
+        equipment_url = f"https://www.bungie.net/Platform/Destiny2/{destiny_membership_type}/Profile/{destiny_membership_id}/Character/{character_id}/?components=205"
+        inventory_url = f"https://www.bungie.net/Platform/Destiny2/{destiny_membership_type}/Profile/{destiny_membership_id}/Character/{character_id}/?components=201"
+        tasks.append(fetch_items(equipment_url))
+        tasks.append(fetch_items(inventory_url))
+
+    responses = await asyncio.gather(*tasks)
+
+    for response in responses:
+        if response:
+            items = response.get('Response', {}).get('equipment', {}).get('data', {}).get('items', []) + \
+                    response.get('Response', {}).get('inventory', {}).get('data', {}).get('items', [])
+            for item in items:
                 item_instance_id = item.get('itemInstanceId', 'N/A')
                 if item_instance_id != 'N/A':
                     all_weapons.append({'itemHash': item['itemHash'], 'itemInstanceId': item_instance_id})
-        else:
-            print(f"Failed to fetch inventory items for character {character_id}")
-                
+
     # Process weapons from the vault
     for item in vault_items:
         item_instance_id = item.get('itemInstanceId', 'N/A')
         if item_instance_id != 'N/A':
-            all_weapons.append({'itemHash': item['itemHash'], 'itemInstanceId': item_instance_id})  
-            
-    store_character_details(character_details, bungieId, db)  
+            all_weapons.append({'itemHash': item['itemHash'], 'itemInstanceId': item_instance_id})
+
+    async_store_character_details(character_details, bungieId, db)
 
     return all_weapons
 
+async def async_store_character_details(character_details, bungieID, db):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,  # Default executor (ThreadPoolExecutor)
+        store_character_details,  # Synchronous function
+        character_details, bungieID, db  # Arguments to the function
+    )
+    print(f"Successfully updated character document for bungieID: {bungieID} in async manner")
 
 def store_character_details(character_details, bungieID, db):
     collection = db["UserCharacterDetails"]
@@ -156,30 +149,35 @@ def store_character_details(character_details, bungieID, db):
     
     print(f"Successfully updated character document for bungieID: {bungieID}")
 
-def fetch_and_save_weapon_data(bungieId, membershipType, headers, db):
+async def fetch_and_save_weapon_data(bungieId, membershipType, destiny_membership_id,session, db):
     try:
-        destiny_membership_id, destiny_membership_type = fetch_destiny_membership_id(bungieId, membershipType, headers)
-
-
-        profile_data = fetch_profile_data(destiny_membership_id, destiny_membership_type, headers)
-
-        all_weapons = process_weapons_from_data(profile_data, destiny_membership_type, destiny_membership_id, headers, bungieId, db)
+        profile_data = await fetch_profile_data(destiny_membership_id, membershipType, session)
+        if profile_data is None:
+            print(f"Failed to fetch profile data for Bungie ID {bungieId}. Skipping...")
+        else:
+            print(f"Successfully fetched profile data for Bungie ID {bungieId}")
         
+        all_weapons = await process_weapons_from_data(profile_data, membershipType, destiny_membership_id, session, bungieId, db)
+        
+        # Assuming export_list_to_mongodb is updated to async or handled properly if it's synchronous
         export_list_to_mongodb(all_weapons, bungieId, destiny_membership_id, db)
 
-        user_inventory = fetch_weapon_perks_concurrently(all_weapons, destiny_membership_type, destiny_membership_id, headers, db)
+        user_inventory = await fetch_weapon_perks_concurrently(all_weapons, membershipType, destiny_membership_id, session)
 
         if user_inventory is None:
             print(f"Failed to fetch weapon perks for Bungie ID {bungieId}. Skipping...")
         else:
             print(f"Successfully fetched weapon perks for Bungie ID {bungieId}")
         
-        return user_inventory, destiny_membership_id
+        return user_inventory
+    
     except Exception as e:
-        tb_str = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
+        tb_str = traceback.format_exception(type(e), e, e.__traceback__)
         tb_str = "".join(tb_str)  # Convert list of strings into a single string
         print(f"An error occurred in fetch_and_save_weapon_data:\n{tb_str}")
+        print(user_inventory)
         return None, None
+
         
 def extract_item_details(user_inventory, weapon_details, db):
     extracted_details = []
@@ -302,17 +300,19 @@ def appraise_inv_parallel(inv, bungieID, destiny_id, db):
     
     return completedinv
 
-
 def export_list_to_mongodb(all_weapons, bungieID, destiny_membership_id, db):
     try:
+        # Assuming `db` is already an instance of AsyncIOMotorClient's database
         collection = db["UserInstanceList"]
-        # Assuming you want to store the list of weapons under a specific bungieID
+        
         document = {
             "bungieID": bungieID,
             "destinyID": destiny_membership_id,
-            "weapons": all_weapons,  # Store the entire list of weapons as part of the document
+            "weapons": all_weapons,
             "timestamp": datetime.now()
         }
+        
+        # Using the asynchronous replace_one method provided by motor
         collection.replace_one({'bungieID': bungieID}, document, upsert=True)
         print(f"Successfully updated MongoDB document for bungieID: {bungieID}")
     except Exception as e:
@@ -327,51 +327,45 @@ def export_to_mongodb(details, bungieID, db):
     
     print(f"Inserted {len(details)} weapons into MongoDB.")
 
-def process_user_inventory(bungieID, membershipType, access_token, weapon_details, db, api_key):
-    headers = {
-        'X-API-Key': api_key,
-        'Authorization': f'Bearer {access_token}'
-    }
-    
+async def process_user_inventory(bungieID, membershipType, destiny_membership_id,weapon_details, db, session):
     print(f"Fetching inventory for Bungie ID {bungieID}")
-    user_inventory, destiny_id = fetch_and_save_weapon_data(bungieID, membershipType, headers, db)
+    user_inventory = await fetch_and_save_weapon_data(bungieID, membershipType, destiny_membership_id,session, db)
 
     if user_inventory is None:
         print(f"Failed to fetch inventory for Bungie ID {bungieID}. Skipping...")
         return  # Early return if user_inventory is None
     
     sanitised_inventory = extract_item_details(user_inventory, weapon_details, db)
-    appraised_inventory = appraise_inv_parallel(sanitised_inventory, bungieID, destiny_id, db)
+    appraised_inventory = appraise_inv_parallel(sanitised_inventory, bungieID, destiny_membership_id, db)
     export_to_mongodb(appraised_inventory, bungieID, db)
-
-
-
-def GetInventory(db, api_key):
     
+    return appraised_inventory
+
+
+
+async def GetInventory(db, bungieID, membershipType, destiny_membership_id,access_token):
     print("Starting inventory processing...")
     
-    testID = '12191971'
+    print("Bungie ID: ", bungieID)
+    print("Membership Type: ", membershipType)
+    print("Destiny Membership ID: ", destiny_membership_id)
     
-    collection = db["UserDetails"] 
-    documents = list(collection.find({'bungie_id': testID}))  # Only get the document with the matching bungie_id
-    
-    weapon_details = load_weapon_names(db)  # Load weapon names into memory
+    async with aiohttp.ClientSession(headers={
+        'X-API-Key': api_key,
+        'Authorization': f'Bearer {access_token}'
+    }) as session:
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        # Submit all user inventory processing tasks to the executor
-        future_to_bungieID = {executor.submit(process_user_inventory, doc['bungie_id'], doc['membership_type'], doc['access_token'], weapon_details, db, api_key): doc for doc in documents}
-        
-        for future in as_completed(future_to_bungieID):
-            bungieID = future_to_bungieID[future]['bungie_id']
-            try:
-                # Here, you could do something with the result if needed
-                future.result()
-                print(f"Successfully processed inventory for Bungie ID {bungieID}")
-            except Exception as exc:
-                tb_str = traceback.format_exception(type(exc), exc, exc.__traceback__)
-                tb_str = "".join(tb_str)  # Convert list of strings into a single string
-                logging.error(f"An error occurred while processing inventory for Bungie ID {bungieID}:\n{tb_str}")
+        # Load weapon names into memory
+        weapon_details = load_weapon_names(db)
 
+        # Process the inventory for the single user
+        try:
+            appraised_inv = await process_user_inventory(bungieID, membershipType, destiny_membership_id,weapon_details, db, session)
+            print(f"Successfully processed inventory for Bungie ID {bungieID}")
+            return appraised_inv
+        except Exception as exc:
+            tb_str = traceback.format_exception(type(exc), exc, exc.__traceback__)
+            tb_str = "".join(tb_str)  # Convert list of strings into a single string
+            logging.error(f"An error occurred while processing inventory for Bungie ID {bungieID}:\n{tb_str}")
 
-    print(f"Processed {len(documents)} documents.")
 

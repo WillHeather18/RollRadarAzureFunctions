@@ -153,6 +153,7 @@ def process_hashes(weapons):
             "watermarkPath": weapon[11],
             "screenshotPath": weapon[12],
             "socket_types": weapon[13],
+            "randomRoll": False
         }
 
         # Attempt to decode the JSON string for stats
@@ -193,7 +194,8 @@ def process_hashes(weapons):
         ammo_type_name = ammo_name_lookup.get(ammo_type, f"Unknown Ammo Type: {ammo_type}")
         
         processed_socket_types = []
-
+        random_roll = False
+        
         # Attempt to decode the JSON string for sockets
         try:
             socket_data = json.loads(weapon_dict["socket_types"])
@@ -201,6 +203,8 @@ def process_hashes(weapons):
                 socket_type_hash = socket_entry.get('socketTypeHash')
                 if socket_type_hash is not None:
                     processed_socket_types.append(socket_type_hash)
+                if 'randomizedPlugSetHash' in socket_entry:
+                    random_roll = True
         except json.JSONDecodeError:
             print(f"Error decoding JSON for sockets in weapon: {weapon_dict['name']}")
             
@@ -220,6 +224,7 @@ def process_hashes(weapons):
         weapon_dict["ammoType"] = ammo_type_name
         weapon_dict["socket_types"] = processed_socket_types
         weapon_dict["weaponSlot"] = weaponSlot
+        weapon_dict["randomRoll"] = random_roll
         
         # Append the updated dictionary to processed_weapons
         processed_weapons.append(weapon_dict)

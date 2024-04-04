@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import datetime
 import json
+import time
 import os
 from azure.storage.queue import (
         QueueClient,
@@ -24,15 +25,23 @@ def generate_urls(db):
         url = f"https://www.light.gg/db/items/{weapon['id']}/{name_for_url}/"
         urls_and_names.append({'url': url, 'name': weapon['name'], 'id': weapon['id']})
     
-    logging.info(f"Generated {len(urls_and_names)} URLs for scraping weapon details.")
+    logging.info(f"ScrapingLOG: Generated {len(urls_and_names)} URLs for scraping weapon details.")
 
     return urls_and_names
 
 def fetch_weapon_details(weapon, session):
+    # Set a User-Agent header to mimic a browser request
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+    }
+
     try:
-        response = session.get(weapon['url'])
+        # Use the session with headers for the request
+        response = session.get(weapon['url'], headers=headers)
         if not response.ok:  # response.ok is True for HTTP status codes 2xx
-            print(f"Failed to fetch {weapon['url']}: {response.status_code}")
+            print(f"ScrapingLOG: Failed to fetch {weapon['url']}: {response.status_code}")
+            return None, []
+
         soup = BeautifulSoup(response.text, 'html.parser')
         community_average_div = soup.find('div', id='community-average')
         weapon_details = {'weaponHash': weapon['id'], 'sockets_details': []}
@@ -61,10 +70,13 @@ def fetch_weapon_details(weapon, session):
                 
                 if socket_details:
                     weapon_details['sockets_details'].append(socket_details)
-        
+
+        # Delay to avoid hitting the server too frequently
+        time.sleep(1)
+
         return (weapon_details, all_perk_names)
     except Exception as e:
-        logging.error(f"Error fetching details for {weapon['url']}: {e}")
+        print(f"ScrapingLOG: Error fetching details for {weapon['url']}: {e}")
         return None, []
 
 def find_hashes_by_names(db, all_perk_names):
@@ -81,7 +93,7 @@ def find_hashes_by_names(db, all_perk_names):
             if name:
                 found_hashes[name] = item['hash']
     except Exception as e:
-        logging.error(f"An error occurred while reading perk hashes: {e}")
+        logging.error(f"ScrapingLOG: An error occurred while reading perk hashes: {e}")
 
     return found_hashes
 
@@ -90,21 +102,20 @@ def scrape_details_and_save(urls_and_names, db):
     session = requests.Session()
     weapon_details_list = []
 
-    logging.info(f"Scraping details for {len(urls_and_names)} weapons.")
+    logging.info(f"ScrapingLOG: Scraping details for {len(urls_and_names)} weapons.")
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_weapon = {executor.submit(fetch_weapon_details, weapon, session): weapon for weapon in urls_and_names}
         counter = 0
         all_perk_names = []  # Collect all perk names first to minimize database queries
         for future in as_completed(future_to_weapon):
-            logging.info(f"Scraping weapon details:{weapon_details}")
             weapon_details, weapon_perk_names = future.result()
             if weapon_details and weapon_details['sockets_details']:
                 all_perk_names.extend(weapon_perk_names)  # Append perks for later processing
                 weapon_details_list.append(weapon_details)
             counter += 1
             if counter % 100 == 0:
-                logging.info(f"Scraped details for {counter} weapons.")
+                logging.info(f"ScrapingLOG: Scraped details for {counter} weapons.")
 
     # Find perk hashes after collecting all perk names to reduce DB queries
     perk_hashes = find_hashes_by_names(db, all_perk_names)
@@ -118,22 +129,24 @@ def scrape_details_and_save(urls_and_names, db):
     if weapon_details_list:
         collection.delete_many({})
         collection.insert_many(weapon_details_list)
-    logging.info(f"Inserted {len(weapon_details_list)} weapons into MongoDB.")
+    logging.info(f"ScrapingLOG: Inserted {len(weapon_details_list)} weapons into MongoDB.")
 
-# Script execution
 def ScrapeGodRolls(db):
+    start_time = datetime.datetime.now()  # Record the start time
 
     urls_and_names = generate_urls(db)
     scrape_details_and_save(urls_and_names, db)
-    logging.info("Scraping completed and details saved to MongoDB collection.")
-    
+
+    end_time = datetime.datetime.now()  # Record the end time
+    duration = end_time - start_time  # Calculate the duration
+
+    logging.info(f"ScrapingLOG: Scraping completed and details saved to MongoDB collection. Time taken: {duration}")
+
     queue_client = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, QUEUE_NAME)
     
     queue_client.message_encode_policy = BinaryBase64EncodePolicy()
     queue_client.message_decode_policy = BinaryBase64DecodePolicy()
     
-    
-
     message = {
                "timestamp" : datetime.datetime.now().isoformat(),
                }

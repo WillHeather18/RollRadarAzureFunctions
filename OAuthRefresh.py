@@ -62,6 +62,7 @@ def store_in_db(user, access_token, refresh_token, refreshed):
         document = {
             'bungie_id': user['bungie_id'],
             'membership_type': user['membership_type'],
+            'destiny_membership_id': user.get('destiny_membership_id'),  # Use .get() to avoid KeyError
             'display_name': user.get('display_name', 'Default Display Name'),
             'icon_url': user.get('icon_url', 'Default Icon URL'),
             'access_token': access_token,
