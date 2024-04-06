@@ -2,40 +2,39 @@ import sqlite3
 import json
 import logging
 
-def get_perks_from_inventory(db_path):
+def get_perks_from_inventory(conn):
     # Connect to the SQLite database
-    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
-    perk_hashes = [
-    7906839, 2833605196, 1806783418, 2718120384, 2619833294, 3962145884, 
-    577918720, 1257608559, 1757026848, 683359327, 1041766312, 3809303875, 
-    1697972157, 1202604782
-    ]
 
-    # Prepare the query to search for items with the specified plugCategoryHashes
-    # Join the perk_hashes into a string for the SQL query
-    perk_hashes_str = ','.join(str(hash) for hash in perk_hashes)
+    # List of hashes to check for
+    hashes = [610365472, 141186804]  # replace with your actual hashes
+
+    # Create a list of LIKE conditions for each hash
+    like_conditions = [f"json_extract(json, '$.itemCategoryHashes') LIKE '%{hash}%'" for hash in hashes]
+
+    # Join the conditions with OR to create the WHERE clause
+    where_clause = " OR ".join(like_conditions)
 
     query = f"""
     SELECT json
     FROM DestinyInventoryItemDefinition
-    WHERE json_extract(json, '$.plug.plugCategoryHash') IN ({perk_hashes_str});
+    WHERE {where_clause};
     """
 
-    perks_data = []
+    items_data = []
     try:
         cursor.execute(query)
         # Fetch all rows, each row's first (and only) item is the item's full JSON data
         rows = cursor.fetchall()
         for row in rows:
-            # Parse the JSON data and append it to the perks_data list
-            perks_data.append(json.loads(row[0]))
+            # Parse the JSON data and append it to the items_data list
+            items_data.append(json.loads(row[0]))
     finally:
         # Make sure to close the database connection
         conn.close()
 
-    return perks_data
+    return items_data
+
 
 def save_perks_to_mongodb(perks_data, db):
     
@@ -51,8 +50,9 @@ def save_perks_to_mongodb(perks_data, db):
 def GetPerks(tempfile_path, db):
     db_path = tempfile_path
 # Specify the path for the JSON file where the perks data will be stored
+    conn = sqlite3.connect(db_path)
 
-    perks_data = get_perks_from_inventory(db_path)
+    perks_data = get_perks_from_inventory(conn)
 
     logging.info(f"Retrieved {len(perks_data)} perks from the Destiny 2 Manifest")
     
